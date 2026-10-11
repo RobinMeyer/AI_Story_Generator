@@ -55,3 +55,11 @@ Install dependencies in an isolated virtual environment before making changes. D
 ## License
 
 This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+
+## Third-party licenses
+
+This application uses PySide6 (Qt for Python). PySide6 and the Qt libraries are
+provided under their respective LGPLv3/GPLv3 or commercial licensing terms.
+They are not relicensed by this project. When distributing a bundled executable
+or archive that includes PySide6/Qt libraries, include the applicable Qt,
+PySide6, and third-party license notices with that distribution.
