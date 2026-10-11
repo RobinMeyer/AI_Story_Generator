@@ -1,6 +1,7 @@
 # AI Story Generator
 
 A Python desktop application for creating long-form stories with AI assistance. Generate an outline, chapters, or individual sections independently, then continue refining any part of the story with additional prompts.
+<img width="1202" height="832" alt="grafik" src="https://github.com/user-attachments/assets/799bd123-021d-45da-b24b-aab18fa7788a" />
 
 ## Features
 
@@ -13,7 +14,6 @@ A Python desktop application for creating long-form stories with AI assistance. 
 ## Requirements
 
 - Python 3.10 or newer
-- An OpenAI API key
 
 ## Installation
 
@@ -42,17 +42,11 @@ A Python desktop application for creating long-form stories with AI assistance. 
    pip install -r requirements.txt
    ```
 
-4. Create a `.env` file in the project root:
-
-   ```env
-   OPENAI_API_KEY=your_api_key_here
-   ```
-
 ## Usage
 
-Start the application with its Python entry-point script. Once running, provide a story concept and generate an outline, chapter, or section. Use follow-up requests to expand, revise, or continue the specific portion of the story you want to work on.
+Start the application with python .\storyteller.py in the venv. Once running, provide a story concept and generate an outline, chapter, or section. Use follow-up requests to expand, revise, or continue the specific portion of the story you want to work on.
 
-> The exact startup command depends on the entry-point script included in the project.
+For the local LLM, I propose using https://github.com/Niko1221/Strata, because larger LLM's are better for stories. Cloud LLM was not successfully tested yet.
 
 ## Development
 
