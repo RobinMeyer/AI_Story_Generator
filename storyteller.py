@@ -38,6 +38,14 @@ PROMPT_LANGUAGES = {
 }
 
 
+def chat_completions_url(api_url):
+    """Return the chat-completions endpoint for local and online APIs."""
+    api_url = api_url.rstrip("/")
+    if api_url.endswith("v1"):
+        return f"{api_url}/chat/completions"
+    return api_url
+
+
 def extract_final_content(message):
     """Return user-facing content while discarding model reasoning fields and tags."""
     if not isinstance(message, dict):
@@ -69,9 +77,10 @@ class AIWorker(QThread):
     error_signal = Signal(str)
     outline_warning_signal = Signal(str)
 
-    def __init__(self, base_url, prompt, num_chapters, num_sections, language, api_key=None):
+    def __init__(self, base_url, model_name, prompt, num_chapters, num_sections, language, api_key=None):
         super().__init__()
         self.base_url = base_url
+        self.model_name = model_name
         self.prompt = prompt
         self.num_chapters = num_chapters
         self.num_sections = num_sections
@@ -165,14 +174,14 @@ class AIWorker(QThread):
             self.error_signal.emit(str(e))
 
     def send_ai_request(self, messages):
-        """Send request to local AI API with full conversation history."""
-        url = f"{self.base_url}/chat/completions"
+        """Send request to an OpenAI-compatible AI API with full conversation history."""
+        url = chat_completions_url(self.base_url)
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         payload = {
-            "model": "qwen-3.8-27b",
+            "model": self.model_name,
             "system": SYSTEM_PROMPT,
             "messages": messages,
             "temperature": 0.7,
@@ -382,6 +391,7 @@ class StoryGenerator(QMainWindow):
         self.setWindowTitle("Story Generator")
         self.setGeometry(100, 100, 1200, 800)
         self.base_url = "http://127.0.0.1:8080/v1"
+        self.model_name = "qwen-3.8-27b"
         self.api_key = None
         self.worker = None
         self.outline = []
@@ -406,6 +416,10 @@ class StoryGenerator(QMainWindow):
         left_layout.addWidget(QLabel("API URL:"))
         self.api_url_input = QLineEdit(self.base_url)
         left_layout.addWidget(self.api_url_input)
+
+        left_layout.addWidget(QLabel("Model Name:"))
+        self.model_name_input = QLineEdit(self.model_name)
+        left_layout.addWidget(self.model_name_input)
 
         left_layout.addWidget(QLabel("API Key (optional):"))
         self.api_key_input = QLineEdit()
@@ -507,6 +521,7 @@ class StoryGenerator(QMainWindow):
 
     def generate_story(self):
         self.base_url = self.api_url_input.text().strip()
+        self.model_name = self.model_name_input.text().strip()
         self.api_key = self.api_key_input.text().strip()
         prompt = self.prompt_input.toPlainText().strip()
         num_chapters = self.chapters_spin.value()
@@ -515,6 +530,12 @@ class StoryGenerator(QMainWindow):
 
         if not prompt:
             QMessageBox.warning(self, "Warning", "Please enter a story idea.")
+            return
+        if not self.base_url:
+            QMessageBox.warning(self, "Warning", "Please enter an API URL.")
+            return
+        if not self.model_name:
+            QMessageBox.warning(self, "Warning", "Please enter a model name.")
             return
 
         # Clear previous story and history
@@ -533,7 +554,8 @@ class StoryGenerator(QMainWindow):
 
         # Start worker
         self.worker = AIWorker(
-            self.base_url, prompt, num_chapters, num_sections, self.story_language, self.api_key
+            self.base_url, self.model_name, prompt, num_chapters, num_sections,
+            self.story_language, self.api_key
         )
         self.worker.progress_signal.connect(self.on_progress)
         self.worker.outline_signal.connect(self.on_outline)
@@ -693,13 +715,13 @@ class StoryGenerator(QMainWindow):
         # Use full conversation history as context
         messages = list(self.history) + [{"role": "user", "content": prompt}]
 
-        url = f"{self.base_url}/chat/completions"
+        url = chat_completions_url(self.base_url)
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         payload = {
-            "model": "qwen-3.8-27b",
+            "model": self.model_name,
             "system": SYSTEM_PROMPT,
             "messages": messages,
             "temperature": 0.7,
