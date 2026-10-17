@@ -31,6 +31,11 @@ SYSTEM_PROMPT = (
     "varied sentences. Maintain narrative continuity, develop the requested premise, "
     "and avoid repetition."
 )
+PROMPT_LANGUAGES = {
+    "english": "English",
+    "german": "German",
+    "french": "French",
+}
 
 
 def extract_final_content(message):
@@ -63,12 +68,13 @@ class AIWorker(QThread):
     finished_signal = Signal(bool, str)  # success, message
     error_signal = Signal(str)
 
-    def __init__(self, base_url, prompt, num_chapters, num_sections, api_key=None):
+    def __init__(self, base_url, prompt, num_chapters, num_sections, language, api_key=None):
         super().__init__()
         self.base_url = base_url
         self.prompt = prompt
         self.num_chapters = num_chapters
         self.num_sections = num_sections
+        self.language = language
         self.api_key = api_key
         self.is_cancelled = False
         self.outline = []
@@ -82,13 +88,7 @@ class AIWorker(QThread):
     def run(self):
         try:
             # Step 1: Generate outline
-            outline_prompt = (
-                f"Erstelle eine Outline für eine Geschichte mit {self.num_chapters} Kapiteln "
-                f"und jeweils {self.num_sections} Sektionen pro Kapitel. "
-                f"Thema: {self.prompt}. Gib die Outline als JSON-Liste zurück, "
-                f"wobei jedes Element ein Kapitel ist und jedes Kapitel eine Liste von "
-                f"Sektionen enthält. Jede Sektion hat einen Titel und eine kurze Beschreibung."
-            )
+            outline_prompt = self.build_outline_prompt()
 
             # Send outline request with no prior history (it's the first call)
             messages = [{"role": "user", "content": outline_prompt}]
@@ -128,10 +128,8 @@ class AIWorker(QThread):
                     section_desc = section.get("desc", "")
 
                     # Build prompt for this section
-                    prompt = (
-                        f"Schreibe Kapitel {chapter_num}, Sektion {section_num}: "
-                        f"{section_title}. {section_desc}. "
-                        f"Schreibe ohne Wiederholungen. Gib nur den Text der Sektion zurück."
+                    prompt = self.build_section_prompt(
+                        chapter_num, section_num, section_title, section_desc
                     )
 
                     # Full history as messages: all prior user+assistant turns,
@@ -183,19 +181,118 @@ class AIWorker(QThread):
         except Exception as e:
             return f"Error: {str(e)}"
 
+    def build_outline_prompt(self):
+        prompt_language = PROMPT_LANGUAGES.get(self.language.lower())
+        if prompt_language == "German":
+            return (
+                f"Erstelle eine Outline fuer eine Geschichte mit {self.num_chapters} Kapiteln "
+                f"und jeweils {self.num_sections} Sektionen pro Kapitel. Thema: {self.prompt}. "
+                "Gib die Outline als JSON-Liste zurueck, wobei jedes Element ein Kapitel ist "
+                "und jedes Kapitel eine Liste von Sektionen enthaelt. Jede Sektion hat einen "
+                "Titel und eine kurze Beschreibung. Schreibe die Geschichte auf Deutsch."
+            )
+        if prompt_language == "French":
+            return (
+                f"Cree un plan pour une histoire de {self.num_chapters} chapitres avec "
+                f"{self.num_sections} sections par chapitre. Sujet : {self.prompt}. "
+                "Retourne le plan sous forme de liste JSON, ou chaque element est un chapitre "
+                "contenant une liste de sections. Chaque section doit avoir un titre et une "
+                "courte description. Ecris l'histoire en francais."
+            )
+        return (
+            f"Create an outline for a story with {self.num_chapters} chapters and "
+            f"{self.num_sections} sections per chapter. Theme: {self.prompt}. Return the "
+            "outline as a JSON list where each item is a chapter containing a list of sections. "
+            "Each section needs a title and a short description. "
+            f"Write the story in {self.language}."
+        )
+
+    def build_section_prompt(self, chapter_num, section_num, section_title, section_desc):
+        prompt_language = PROMPT_LANGUAGES.get(self.language.lower())
+        if prompt_language == "German":
+            return (
+                f"Schreibe Kapitel {chapter_num}, Sektion {section_num}: {section_title}. "
+                f"{section_desc}. Schreibe ohne Wiederholungen. Gib nur den Text der Sektion "
+                "zurueck. Schreibe auf Deutsch."
+            )
+        if prompt_language == "French":
+            return (
+                f"Ecris le chapitre {chapter_num}, section {section_num} : {section_title}. "
+                f"{section_desc}. Evite les repetitions. Retourne uniquement le texte de la "
+                "section. Ecris en francais."
+            )
+        return (
+            f"Write chapter {chapter_num}, section {section_num}: {section_title}. "
+            f"{section_desc}. Avoid repetition. Return only the section text. "
+            f"Write in {self.language}."
+        )
+
     def parse_outline(self, response):
-        """Try to parse outline from AI response."""
+        """Extract the first valid JSON outline array from a model response."""
         try:
-            import re
-            # Try to find JSON array
-            json_match = re.search(r'\[.*\]', response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group()
-                data = json.loads(json_str)
-                return data
+            cleaned_response = re.sub(
+                r"```(?:json)?\s*|```", "", response, flags=re.IGNORECASE
+            ).strip()
+            decoder = json.JSONDecoder()
+
+            for match in re.finditer(r"\[", cleaned_response):
+                try:
+                    data, _ = decoder.raw_decode(cleaned_response[match.start():])
+                    if isinstance(data, list):
+                        return self.normalize_outline(data)
+                except json.JSONDecodeError:
+                    continue
             return None
-        except:
+        except (TypeError, json.JSONDecodeError):
             return None
+
+    def normalize_outline(self, outline):
+        """Convert localized outline keys to the schema used by story generation."""
+        chapter_keys = ("chapter", "kapitel", "chapitre", "capitulo", "capitulo")
+        section_keys = ("sections", "sektionen", "sections", "secciones")
+        title_keys = ("title", "titel", "titre", "titulo")
+        description_keys = ("desc", "description", "beschreibung", "descripcion")
+
+        normalized_outline = []
+        for chapter_index, chapter in enumerate(outline, start=1):
+            if not isinstance(chapter, dict):
+                continue
+
+            chapter_value = next(
+                (chapter[key] for key in chapter_keys if key in chapter), chapter_index
+            )
+            if isinstance(chapter_value, int):
+                chapter_number = chapter_value
+            else:
+                chapter_number_match = re.search(r"\d+", str(chapter_value))
+                chapter_number = (
+                    int(chapter_number_match.group())
+                    if chapter_number_match else chapter_index
+                )
+            sections = next(
+                (chapter[key] for key in section_keys if key in chapter), []
+            )
+            if not isinstance(sections, list):
+                continue
+
+            normalized_sections = []
+            for section_index, section in enumerate(sections, start=1):
+                if not isinstance(section, dict):
+                    continue
+                title = next(
+                    (section[key] for key in title_keys if key in section),
+                    f"Section {section_index}"
+                )
+                description = next(
+                    (section[key] for key in description_keys if key in section), ""
+                )
+                normalized_sections.append({"title": title, "desc": description})
+
+            normalized_outline.append(
+                {"chapter": chapter_number, "sections": normalized_sections}
+            )
+
+        return normalized_outline
 
     def save_story(self):
         """Return the full story as a string."""
@@ -224,6 +321,7 @@ class StoryGenerator(QMainWindow):
         self.outline_response = ""
         self.story = {}  # key: "chapter_section", value: content
         self.generation_started_at = None
+        self.story_language = "English"
         # Conversation history stored on the main window for regenerate use
         self.history = []
 
@@ -250,6 +348,12 @@ class StoryGenerator(QMainWindow):
         self.prompt_input = QTextEdit()
         self.prompt_input.setMaximumHeight(100)
         left_layout.addWidget(self.prompt_input)
+
+        left_layout.addWidget(QLabel("Story Language:"))
+        self.language_combo = QComboBox()
+        self.language_combo.setEditable(True)
+        self.language_combo.addItems(["English", "German", "French"])
+        left_layout.addWidget(self.language_combo)
 
         left_layout.addWidget(QLabel("Number of Chapters:"))
         self.chapters_spin = QSpinBox()
@@ -340,6 +444,7 @@ class StoryGenerator(QMainWindow):
         prompt = self.prompt_input.toPlainText().strip()
         num_chapters = self.chapters_spin.value()
         num_sections = self.sections_spin.value()
+        self.story_language = self.language_combo.currentText().strip() or "English"
 
         if not prompt:
             QMessageBox.warning(self, "Warning", "Please enter a story idea.")
@@ -360,7 +465,9 @@ class StoryGenerator(QMainWindow):
         self.speed_status_label.setText("LLM speed: -")
 
         # Start worker
-        self.worker = AIWorker(self.base_url, prompt, num_chapters, num_sections, self.api_key)
+        self.worker = AIWorker(
+            self.base_url, prompt, num_chapters, num_sections, self.story_language, self.api_key
+        )
         self.worker.progress_signal.connect(self.on_progress)
         self.worker.outline_signal.connect(self.on_outline)
         self.worker.finished_signal.connect(self.on_finished)
@@ -508,10 +615,8 @@ class StoryGenerator(QMainWindow):
         section_desc = section.get("desc", "")
 
         # Build the prompt for regeneration
-        prompt = (
-            f"Schreibe Kapitel {chapter_num}, Sektion {section_num}: "
-            f"{section_title}. {section_desc}. "
-            f"Schreibe ohne Wiederholungen. Gib nur den Text der Sektion zurück."
+        prompt = self.build_section_prompt(
+            chapter_num, section_num, section_title, section_desc
         )
 
         # Use full conversation history as context
@@ -609,6 +714,26 @@ class StoryGenerator(QMainWindow):
             QMessageBox.information(self, "Done", f"PDF saved to {file_path}")
         except Exception as e:
             QMessageBox.warning(self, "Error", str(e))
+
+    def build_section_prompt(self, chapter_num, section_num, section_title, section_desc):
+        prompt_language = PROMPT_LANGUAGES.get(self.story_language.lower())
+        if prompt_language == "German":
+            return (
+                f"Schreibe Kapitel {chapter_num}, Sektion {section_num}: {section_title}. "
+                f"{section_desc}. Schreibe ohne Wiederholungen. Gib nur den Text der Sektion "
+                "zurueck. Schreibe auf Deutsch."
+            )
+        if prompt_language == "French":
+            return (
+                f"Ecris le chapitre {chapter_num}, section {section_num} : {section_title}. "
+                f"{section_desc}. Evite les repetitions. Retourne uniquement le texte de la "
+                "section. Ecris en francais."
+            )
+        return (
+            f"Write chapter {chapter_num}, section {section_num}: {section_title}. "
+            f"{section_desc}. Avoid repetition. Return only the section text. "
+            f"Write in {self.story_language}."
+        )
 
     def save_as_markdown(self):
         if not self.outline:
