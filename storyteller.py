@@ -67,6 +67,7 @@ class AIWorker(QThread):
     outline_signal = Signal(str, str)  # parsed outline JSON, original response text
     finished_signal = Signal(bool, str)  # success, message
     error_signal = Signal(str)
+    outline_warning_signal = Signal(str)
 
     def __init__(self, base_url, prompt, num_chapters, num_sections, language, api_key=None):
         super().__init__()
@@ -79,6 +80,7 @@ class AIWorker(QThread):
         self.is_cancelled = False
         self.outline = []
         self.story = {}  # key: "chapter_section", value: content
+        self.outline_parse_error = ""
         # Full conversation history — each entry is a dict with role/content
         self.history = []
 
@@ -103,13 +105,18 @@ class AIWorker(QThread):
             # Parse outline
             self.outline = self.parse_outline(response)
             if not self.outline:
-                self.error_signal.emit("Failed to parse outline. Using fallback structure.")
+                self.outline_warning_signal.emit(
+                    f"Failed to parse outline: {self.outline_parse_error}. "
+                    "Using fallback structure."
+                )
                 self.outline = []
                 for ch in range(1, self.num_chapters + 1):
                     sections = []
                     for sec in range(1, self.num_sections + 1):
                         sections.append({"title": f"Kapitel {ch} - Sektion {sec}", "desc": "Content"})
                     self.outline.append({"chapter": ch, "sections": sections})
+            elif self.outline_parse_error:
+                self.outline_warning_signal.emit(self.outline_parse_error)
 
             self.outline_signal.emit(json.dumps(self.outline, indent=2), response)
 
@@ -228,30 +235,84 @@ class AIWorker(QThread):
         )
 
     def parse_outline(self, response):
-        """Extract the first valid JSON outline array from a model response."""
-        try:
-            cleaned_response = re.sub(
-                r"```(?:json)?\s*|```", "", response, flags=re.IGNORECASE
-            ).strip()
-            decoder = json.JSONDecoder()
+        """Extract an outline, reporting whether a positional recovery was required."""
+        self.outline_parse_error = ""
+        if not isinstance(response, str):
+            self.outline_parse_error = "The model response is not text."
+            return None
 
-            for match in re.finditer(r"\[", cleaned_response):
+        cleaned_response = re.sub(
+            r"```(?:json)?\s*|```", "", response, flags=re.IGNORECASE
+        ).strip()
+        decoder = json.JSONDecoder()
+        parse_errors = []
+
+        for match in re.finditer(r"\[", cleaned_response):
+            try:
+                data, _ = decoder.raw_decode(cleaned_response[match.start():])
+            except json.JSONDecodeError as error:
+                parse_errors.append(
+                    f"invalid JSON at character {match.start() + error.pos}: {error.msg}"
+                )
+                continue
+            if isinstance(data, list):
+                normalized_outline = self.normalize_outline(data)
+                if normalized_outline:
+                    return normalized_outline
+                parse_errors.append("the JSON array does not contain recognizable chapters")
+
+        recovered_outline = self.parse_outline_by_position(cleaned_response)
+        if recovered_outline:
+            reason = parse_errors[0] if parse_errors else "no JSON array was found"
+            self.outline_parse_error = (
+                f"Outline JSON could not be parsed strictly ({reason}). "
+                "Recovered titles and descriptions by their positions in section objects."
+            )
+            return recovered_outline
+
+        self.outline_parse_error = (
+            parse_errors[0] if parse_errors else "No JSON array or recoverable section objects were found"
+        )
+        return None
+
+    def parse_outline_by_position(self, response):
+        """Recover title/description pairs from malformed JSON section objects."""
+        sections = []
+        for object_text in re.findall(r"\{[^{}]*\}", response, flags=re.DOTALL):
+            values = re.findall(r':\s*("(?:\\.|[^"\\])*")', object_text)
+            if not values:
+                continue
+            decoded_values = []
+            for value in values:
                 try:
-                    data, _ = decoder.raw_decode(cleaned_response[match.start():])
-                    if isinstance(data, list):
-                        return self.normalize_outline(data)
+                    decoded_values.append(json.loads(value))
                 except json.JSONDecodeError:
                     continue
+            if decoded_values:
+                sections.append({
+                    "title": str(decoded_values[0]),
+                    "desc": str(decoded_values[1]) if len(decoded_values) > 1 else "",
+                })
+
+        expected_sections = self.num_chapters * self.num_sections
+        if len(sections) < expected_sections:
             return None
-        except (TypeError, json.JSONDecodeError):
-            return None
+
+        recovered_outline = []
+        for chapter_number in range(1, self.num_chapters + 1):
+            start = (chapter_number - 1) * self.num_sections
+            recovered_outline.append({
+                "chapter": chapter_number,
+                "sections": sections[start:start + self.num_sections],
+            })
+        return recovered_outline
 
     def normalize_outline(self, outline):
         """Convert localized outline keys to the schema used by story generation."""
-        chapter_keys = ("chapter", "kapitel", "chapitre", "capitulo", "capitulo")
-        section_keys = ("sections", "sektionen", "sections", "secciones")
-        title_keys = ("title", "titel", "titre", "titulo")
-        description_keys = ("desc", "description", "beschreibung", "descripcion")
+        chapter_keys = ("chapter", "chapter_title", "kapitel", "Kapitel", "chapitre", "capitulo", "capitulo")
+        section_keys = ("sections", "sektionen", "Sektionen", "sections", "secciones")
+        title_keys = ("title", "section_title", "titel", "Titel", "titre", "titulo")
+        description_keys = ("desc", "description", "beschreibung", "Beschreibung", "descripcion")
 
         normalized_outline = []
         for chapter_index, chapter in enumerate(outline, start=1):
@@ -259,7 +320,8 @@ class AIWorker(QThread):
                 continue
 
             chapter_value = next(
-                (chapter[key] for key in chapter_keys if key in chapter), chapter_index
+                (chapter[key] for key in chapter_keys if key in chapter),
+                next((value for value in chapter.values() if not isinstance(value, (dict, list))), chapter_index)
             )
             if isinstance(chapter_value, int):
                 chapter_number = chapter_value
@@ -270,7 +332,8 @@ class AIWorker(QThread):
                     if chapter_number_match else chapter_index
                 )
             sections = next(
-                (chapter[key] for key in section_keys if key in chapter), []
+                (chapter[key] for key in section_keys if key in chapter),
+                next((value for value in chapter.values() if isinstance(value, list)), [])
             )
             if not isinstance(sections, list):
                 continue
@@ -279,12 +342,16 @@ class AIWorker(QThread):
             for section_index, section in enumerate(sections, start=1):
                 if not isinstance(section, dict):
                     continue
+                positional_values = [
+                    value for value in section.values() if not isinstance(value, (dict, list))
+                ]
                 title = next(
                     (section[key] for key in title_keys if key in section),
-                    f"Section {section_index}"
+                    positional_values[0] if positional_values else f"Section {section_index}"
                 )
                 description = next(
-                    (section[key] for key in description_keys if key in section), ""
+                    (section[key] for key in description_keys if key in section),
+                    positional_values[1] if len(positional_values) > 1 else ""
                 )
                 normalized_sections.append({"title": title, "desc": description})
 
@@ -472,6 +539,7 @@ class StoryGenerator(QMainWindow):
         self.worker.outline_signal.connect(self.on_outline)
         self.worker.finished_signal.connect(self.on_finished)
         self.worker.error_signal.connect(self.on_error)
+        self.worker.outline_warning_signal.connect(self.on_outline_warning)
         self.worker.start()
 
         self.generate_btn.setEnabled(False)
@@ -528,6 +596,9 @@ class StoryGenerator(QMainWindow):
         self.generate_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         QMessageBox.warning(self, "Error", error)
+
+    def on_outline_warning(self, warning):
+        QMessageBox.warning(self, "Outline Parsing Warning", warning)
 
     def update_markdown_viewer(self):
         if not self.outline:
