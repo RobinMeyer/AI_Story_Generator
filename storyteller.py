@@ -1,5 +1,6 @@
 import sys
 import json
+import re
 import requests
 import threading
 import time
@@ -19,6 +20,33 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER, TA_LEFT
+
+
+THINKING_TAG_NAME = r"[^>\s]*(?:think|reason|analysis|thought|scratch|reflection)[^>\s]*"
+REASONING_EFFORT = "low"
+
+
+def extract_final_content(message):
+    """Return user-facing content while discarding model reasoning fields and tags."""
+    if not isinstance(message, dict):
+        return ""
+
+    content = message.get("content") or message.get("final") or message.get("output_text") or ""
+    if isinstance(content, list):
+        content = "".join(
+            "" if isinstance(part, dict) and re.search(
+                THINKING_TAG_NAME, part.get("type", ""), re.IGNORECASE
+            ) else part.get("text", part.get("content", "")) if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    if not isinstance(content, str):
+        content = str(content)
+
+    tag_pattern = rf"<(?P<tag>{THINKING_TAG_NAME})(?:\s[^>]*)?>.*?</(?P=tag)\s*>"
+    bracket_pattern = rf"\[(?P<tag>{THINKING_TAG_NAME})\].*?\[/(?P=tag)\]"
+    content = re.sub(tag_pattern, "", content, flags=re.IGNORECASE | re.DOTALL)
+    content = re.sub(bracket_pattern, "", content, flags=re.IGNORECASE | re.DOTALL)
+    return content.strip()
 
 
 class AIWorker(QThread):
@@ -135,15 +163,15 @@ class AIWorker(QThread):
             "model": "qwen-3.8-27b",
             "messages": messages,
             "temperature": 0.7,
-            "reasoning_effort": "none"
+            "reasoning_effort": REASONING_EFFORT
         }
-
+        #"chat_template_kwargs": {"enable_thinking": False}
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=120)
             response.raise_for_status()
             data = response.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            return content.strip()
+            message = data.get("choices", [{}])[0].get("message", {})
+            return extract_final_content(message)
         except Exception as e:
             return f"Error: {str(e)}"
 
@@ -403,14 +431,15 @@ class StoryGenerator(QMainWindow):
             "model": "qwen-3.8-27b",
             "messages": messages,
             "temperature": 0.7,
-            "reasoning_effort": "none"
+            "reasoning_effort": REASONING_EFFORT
         }
 
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=120)
             response.raise_for_status()
             data = response.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            message = data.get("choices", [{}])[0].get("message", {})
+            content = extract_final_content(message)
 
             key = f"{chapter_num}_{section_num}"
             self.story[key] = content
