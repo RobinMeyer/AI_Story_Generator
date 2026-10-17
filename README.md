@@ -6,11 +6,16 @@ A Python desktop application for creating long-form stories with AI assistance. 
 
 ## Features
 
-- Generate story ideas, outlines, chapters, and sections
+- Generate structured story outlines, chapters, and sections from a story idea
 - Continue or rewrite a selected section without regenerating the whole story
 - Build longer stories through multiple focused AI requests
+- Choose English, German, French, or enter any custom story language
+- Review the generated story and the original outline response in separate tabs
+- Save the complete story as PDF or Markdown and save the original outline response as text
+- Monitor the current chapter, section, generated characters, and average generation speed
+- Use a dedicated system prompt to guide the model's writing style
 - Desktop user interface built with PySide6
-- Keep API credentials outside source code with a local `.env` file
+- Optional API key support for compatible chat-completions APIs
 
 ## Requirements
 
@@ -45,7 +50,17 @@ A Python desktop application for creating long-form stories with AI assistance. 
 
 ## Usage
 
-Start the application with python .\storyteller.py in the venv. Once running, provide a story concept and generate an outline, chapter, or section. Use follow-up requests to expand, revise, or continue the specific portion of the story you want to work on.
+Start the application with:
+
+```powershell
+python .\storyteller.py
+```
+
+Enter the API URL, optional API key, story idea, language, chapter count, and sections per chapter, then select **Generate Story**. The language menu includes English, German, and French, but you can type another language; the application then uses English instructions while asking the model to write in your chosen language.
+
+The right pane has separate **Story** and **Outline** tabs. Each keeps its scroll position while new story sections are generated. The outline tab displays the original model response, which can also be saved with **Save Outline**. Use **Save as PDF** or **Save as Markdown** to export the generated story.
+
+During generation, the status lines show the most recently completed chapter and section, total generated characters, and the average output speed in characters per second. You can cancel a run or regenerate a selected section after generation completes.
 
 For the local LLM, I propose using https://github.com/Niko1221/Strata, because larger LLM's are better for stories. Cloud LLM was not successfully tested yet.
 
