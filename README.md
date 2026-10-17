@@ -1,7 +1,8 @@
 # AI Story Generator
 
 A Python desktop application for creating long-form stories with AI assistance. Generate an outline, chapters, or individual sections independently, then continue refining any part of the story with additional prompts.
-<img width="1202" height="832" alt="grafik" src="https://github.com/user-attachments/assets/799bd123-021d-45da-b24b-aab18fa7788a" />
+<img width="1202" height="832" alt="grafik" src="https://github.com/user-attachments/assets/e186d7f8-fcf2-4228-bb4d-896a4d91c187" />
+
 
 ## Features
 
