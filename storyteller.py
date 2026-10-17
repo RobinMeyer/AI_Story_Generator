@@ -1,13 +1,14 @@
 import sys
 import json
 import re
+from html import escape
 import requests
 import threading
 import time
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QSpinBox, QLineEdit, QLabel, QComboBox,
-    QSplitter, QMessageBox, QFileDialog, QCheckBox
+    QSplitter, QMessageBox, QFileDialog, QCheckBox, QTabWidget
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject
 from PySide6.QtGui import QFont, QTextCursor
@@ -24,6 +25,12 @@ from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER, TA_LEFT
 
 THINKING_TAG_NAME = r"[^>\s]*(?:think|reason|analysis|thought|scratch|reflection)[^>\s]*"
 REASONING_EFFORT = "low"
+SYSTEM_PROMPT = (
+    "You are an expert story writer. Create vivid, imaginative scenes with emotional "
+    "clarity, sensory detail, and purposeful character action. Use medium-length, "
+    "varied sentences. Maintain narrative continuity, develop the requested premise, "
+    "and avoid repetition."
+)
 
 
 def extract_final_content(message):
@@ -52,7 +59,7 @@ def extract_final_content(message):
 class AIWorker(QThread):
     """Thread to handle AI requests without blocking the UI."""
     progress_signal = Signal(str, str, str)  # chapter, section, content
-    outline_signal = Signal(str)  # outline text
+    outline_signal = Signal(str, str)  # parsed outline JSON, original response text
     finished_signal = Signal(bool, str)  # success, message
     error_signal = Signal(str)
 
@@ -104,7 +111,7 @@ class AIWorker(QThread):
                         sections.append({"title": f"Kapitel {ch} - Sektion {sec}", "desc": "Content"})
                     self.outline.append({"chapter": ch, "sections": sections})
 
-            self.outline_signal.emit(json.dumps(self.outline, indent=2))
+            self.outline_signal.emit(json.dumps(self.outline, indent=2), response)
 
             # Step 2: Generate story chapter by chapter, section by section
             for ch_idx, chapter in enumerate(self.outline):
@@ -161,6 +168,7 @@ class AIWorker(QThread):
 
         payload = {
             "model": "qwen-3.8-27b",
+            "system": SYSTEM_PROMPT,
             "messages": messages,
             "temperature": 0.7,
             "reasoning_effort": REASONING_EFFORT
@@ -213,7 +221,9 @@ class StoryGenerator(QMainWindow):
         self.api_key = None
         self.worker = None
         self.outline = []
+        self.outline_response = ""
         self.story = {}  # key: "chapter_section", value: content
+        self.generation_started_at = None
         # Conversation history stored on the main window for regenerate use
         self.history = []
 
@@ -279,14 +289,37 @@ class StoryGenerator(QMainWindow):
         self.save_pdf_btn.setEnabled(False)
         left_layout.addWidget(self.save_pdf_btn)
 
+        self.save_markdown_btn = QPushButton("Save as Markdown")
+        self.save_markdown_btn.clicked.connect(self.save_as_markdown)
+        self.save_markdown_btn.setEnabled(False)
+        left_layout.addWidget(self.save_markdown_btn)
+
+        self.save_outline_btn = QPushButton("Save Outline")
+        self.save_outline_btn.clicked.connect(self.save_outline)
+        self.save_outline_btn.setEnabled(False)
+        left_layout.addWidget(self.save_outline_btn)
+
+        self.chapter_status_label = QLabel("Current chapter: -")
+        self.section_status_label = QLabel("Current section: -")
+        self.characters_status_label = QLabel("Generated characters: 0")
+        self.speed_status_label = QLabel("LLM speed: -")
+        left_layout.addWidget(self.chapter_status_label)
+        left_layout.addWidget(self.section_status_label)
+        left_layout.addWidget(self.characters_status_label)
+        left_layout.addWidget(self.speed_status_label)
+
         left_layout.addStretch()
 
-        # Right panel - markdown viewer
+        # Right panel - story and outline previews
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
 
-        self.web_view = QWebEngineView()
-        right_layout.addWidget(self.web_view)
+        self.preview_tabs = QTabWidget()
+        self.story_view = QWebEngineView()
+        self.outline_view = QWebEngineView()
+        self.preview_tabs.addTab(self.story_view, "Story")
+        self.preview_tabs.addTab(self.outline_view, "Outline")
+        right_layout.addWidget(self.preview_tabs)
 
         layout.addWidget(left_widget, 1)
         layout.addWidget(right_widget, 3)
@@ -315,9 +348,16 @@ class StoryGenerator(QMainWindow):
         # Clear previous story and history
         self.story = {}
         self.outline = []
+        self.outline_response = ""
         self.history = []
-        self.web_view.setHtml("")
+        self.generation_started_at = time.monotonic()
+        self.story_view.setHtml("")
+        self.outline_view.setHtml("")
         self.update_combo_boxes()
+        self.chapter_status_label.setText("Current chapter: -")
+        self.section_status_label.setText("Current section: -")
+        self.characters_status_label.setText("Generated characters: 0")
+        self.speed_status_label.setText("LLM speed: -")
 
         # Start worker
         self.worker = AIWorker(self.base_url, prompt, num_chapters, num_sections, self.api_key)
@@ -330,6 +370,8 @@ class StoryGenerator(QMainWindow):
         self.generate_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.save_pdf_btn.setEnabled(False)
+        self.save_markdown_btn.setEnabled(False)
+        self.save_outline_btn.setEnabled(False)
         self.regenerate_btn.setEnabled(False)
 
     def cancel_generation(self):
@@ -339,12 +381,26 @@ class StoryGenerator(QMainWindow):
     def on_progress(self, chapter, section, content):
         key = f"{chapter}_{section}"
         self.story[key] = content
+        self.chapter_status_label.setText(f"Current chapter: {chapter}")
+        self.section_status_label.setText(f"Current section: {section}")
+
+        character_count = sum(len(section_content) for section_content in self.story.values())
+        self.characters_status_label.setText(f"Generated characters: {character_count:,}")
+
+        elapsed_seconds = time.monotonic() - self.generation_started_at
+        if elapsed_seconds > 0:
+            characters_per_second = character_count / elapsed_seconds
+            self.speed_status_label.setText(f"LLM speed: {characters_per_second:.1f} chars/s")
+
         # Sync history from worker so regenerate can use it
         if self.worker:
             self.history = list(self.worker.history)
         self.update_markdown_viewer()
 
-    def on_outline(self, outline_json):
+    def on_outline(self, outline_json, outline_response):
+        self.outline_response = outline_response
+        self.update_outline_viewer()
+        self.save_outline_btn.setEnabled(True)
         try:
             self.outline = json.loads(outline_json)
         except:
@@ -357,6 +413,7 @@ class StoryGenerator(QMainWindow):
         self.generate_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.save_pdf_btn.setEnabled(True)
+        self.save_markdown_btn.setEnabled(True)
         self.regenerate_btn.setEnabled(True)
         QMessageBox.information(self, "Done", message)
 
@@ -390,7 +447,45 @@ class StoryGenerator(QMainWindow):
                 p { line-height: 1.6; }
             </style>
             """
-            self.web_view.setHtml(f"{css}<html><body>{html}</body></html>")
+            self.set_html_preserving_scroll(self.story_view, f"{css}<html><body>{html}</body></html>")
+
+    def update_outline_viewer(self):
+        css = """
+        <style>
+            body { font-family: monospace; margin: 20px; white-space: pre-wrap; }
+        </style>
+        """
+        html = f"{css}<html><body>{escape(self.outline_response)}</body></html>"
+        self.set_html_preserving_scroll(self.outline_view, html)
+
+    def set_html_preserving_scroll(self, view, html):
+        def update_view(scroll_position):
+            def restore_scroll(_success):
+                view.loadFinished.disconnect(restore_scroll)
+                view.page().runJavaScript(f"window.scrollTo(0, {scroll_position or 0});")
+
+            view.loadFinished.connect(restore_scroll)
+            view.setHtml(html)
+
+        view.page().runJavaScript("window.scrollY", update_view)
+
+    def save_outline(self):
+        if not self.outline_response:
+            QMessageBox.warning(self, "Warning", "No outline generated.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Outline", "", "Text Files (*.txt);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as outline_file:
+                outline_file.write(self.outline_response)
+            QMessageBox.information(self, "Done", f"Outline saved to {file_path}")
+        except OSError as error:
+            QMessageBox.warning(self, "Error", str(error))
 
     def regenerate_section(self):
         chapter_idx = self.regenerate_chapter_combo.currentIndex()
@@ -429,6 +524,7 @@ class StoryGenerator(QMainWindow):
 
         payload = {
             "model": "qwen-3.8-27b",
+            "system": SYSTEM_PROMPT,
             "messages": messages,
             "temperature": 0.7,
             "reasoning_effort": REASONING_EFFORT
@@ -513,6 +609,36 @@ class StoryGenerator(QMainWindow):
             QMessageBox.information(self, "Done", f"PDF saved to {file_path}")
         except Exception as e:
             QMessageBox.warning(self, "Error", str(e))
+
+    def save_as_markdown(self):
+        if not self.outline:
+            QMessageBox.warning(self, "Warning", "No story generated.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Markdown", "", "Markdown Files (*.md);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        markdown_content = []
+        for ch_idx, chapter in enumerate(self.outline):
+            chapter_num = chapter.get("chapter", ch_idx + 1)
+            markdown_content.append(f"# Kapitel {chapter_num}\n")
+
+            for sec_idx, section in enumerate(chapter.get("sections", [])):
+                section_num = sec_idx + 1
+                key = f"{chapter_num}_{section_num}"
+                title = section.get("title", f"Sektion {section_num}")
+                content = self.story.get(key, "")
+                markdown_content.append(f"\n## {title}\n\n{content}\n")
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as markdown_file:
+                markdown_file.write("".join(markdown_content))
+            QMessageBox.information(self, "Done", f"Markdown saved to {file_path}")
+        except OSError as error:
+            QMessageBox.warning(self, "Error", str(error))
 
 
 def main():
