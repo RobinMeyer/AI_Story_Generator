@@ -1,7 +1,9 @@
 # AI Story Generator
 
 A Python desktop application for creating long-form stories with AI assistance. Generate an outline, chapters, or individual sections independently, then continue refining any part of the story with additional prompts.
-<img width="1202" height="832" alt="grafik" src="https://github.com/user-attachments/assets/b1aef5fd-da9c-483d-838b-da76e47f3785" />
+
+<img width="1202" height="870" alt="grafik" src="https://github.com/user-attachments/assets/8d523998-4297-46a6-87c8-8830c065261d" />
+
 
 
 
@@ -11,6 +13,7 @@ A Python desktop application for creating long-form stories with AI assistance. 
 - Continue or rewrite a selected section without regenerating the whole story
 - Build longer stories through multiple focused AI requests
 - Choose English, German, French, or enter any custom story language
+- Configure thinking mode and temperature (default is recommended)
 - Review the generated story and the original outline response in separate tabs
 - Save the complete story as PDF or Markdown and save the original outline response as text
 - Monitor the current chapter, section, generated characters, and average generation speed
@@ -63,7 +66,7 @@ The right pane has separate **Story** and **Outline** tabs. Each keeps its scrol
 
 During generation, the status lines show the most recently completed chapter and section, total generated characters, and the average output speed in characters per second. You can cancel a run or regenerate a selected section after generation completes.
 
-For the local LLM, I propose using https://github.com/Niko1221/Strata, because larger LLM's are better for stories. Cloud LLM was not successfully tested yet.
+For the local LLM, I propose using https://github.com/Niko1221/Strata, because larger LLM's are better for stories. It is recommended to not use thinking mode and the default temperature for Strata.
 
 ## Development
 
