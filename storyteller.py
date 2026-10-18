@@ -38,6 +38,24 @@ PROMPT_LANGUAGES = {
 }
 
 
+class RequestSettings:
+    """Thread-safe request settings shared by the UI and generation worker."""
+
+    def __init__(self, thinking_enabled=False, temperature=0.7):
+        self._lock = threading.Lock()
+        self.thinking_enabled = thinking_enabled
+        self.temperature = temperature
+
+    def update(self, thinking_enabled, temperature):
+        with self._lock:
+            self.thinking_enabled = thinking_enabled
+            self.temperature = temperature
+
+    def snapshot(self):
+        with self._lock:
+            return self.thinking_enabled, self.temperature
+
+
 def chat_completions_url(api_url):
     """Return the chat-completions endpoint for local and online APIs."""
     api_url = api_url.rstrip("/")
@@ -78,7 +96,7 @@ class AIWorker(QThread):
     outline_warning_signal = Signal(str)
 
     def __init__(self, base_url, model_name, prompt, num_chapters, num_sections, language,
-                 api_key=None, thinking_enabled=False, temperature=0.7):
+                 api_key=None, thinking_enabled=False, temperature=0.7, request_settings=None):
         super().__init__()
         self.base_url = base_url
         self.model_name = model_name
@@ -87,8 +105,9 @@ class AIWorker(QThread):
         self.num_sections = num_sections
         self.language = language
         self.api_key = api_key
-        self.thinking_enabled = thinking_enabled
-        self.temperature = temperature
+        self.request_settings = request_settings or RequestSettings(
+            thinking_enabled, temperature
+        )
         self.is_cancelled = False
         self.outline = []
         self.story = {}  # key: "chapter_section", value: content
@@ -183,13 +202,14 @@ class AIWorker(QThread):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        thinking_enabled, temperature = self.request_settings.snapshot()
         payload = {
             "model": self.model_name,
             "system": SYSTEM_PROMPT,
             "messages": messages,
-            "temperature": self.temperature,
+            "temperature": temperature,
         }
-        if self.thinking_enabled:
+        if thinking_enabled:
             payload["reasoning_effort"] = REASONING_EFFORT
         else:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
@@ -284,6 +304,15 @@ class AIWorker(QThread):
             )
             return recovered_outline
 
+        description_outline = self.parse_outline_by_description_tags(cleaned_response)
+        if description_outline:
+            reason = parse_errors[0] if parse_errors else "no JSON array was found"
+            self.outline_parse_error = (
+                f"Outline JSON could not be parsed strictly ({reason}). "
+                "Recovered chapters and sections from description tags."
+            )
+            return description_outline
+
         self.outline_parse_error = (
             parse_errors[0] if parse_errors else "No JSON array or recoverable section objects were found"
         )
@@ -319,6 +348,34 @@ class AIWorker(QThread):
                 "chapter": chapter_number,
                 "sections": sections[start:start + self.num_sections],
             })
+        return recovered_outline
+
+    def parse_outline_by_description_tags(self, response):
+        """Recover an outline from XML-like description tags in a model response."""
+        descriptions = [
+            re.sub(r"\s+", " ", description).strip()
+            for description in re.findall(
+                r"<description(?:\s[^>]*)?>(.*?)</description\s*>",
+                response,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if description.strip()
+        ]
+        if not descriptions:
+            return None
+
+        recovered_outline = []
+        for start in range(0, len(descriptions), self.num_sections):
+            chapter_number = len(recovered_outline) + 1
+            sections = []
+            for section_number, description in enumerate(
+                descriptions[start:start + self.num_sections], start=1
+            ):
+                sections.append({
+                    "title": f"Section {section_number}",
+                    "desc": description,
+                })
+            recovered_outline.append({"chapter": chapter_number, "sections": sections})
         return recovered_outline
 
     def normalize_outline(self, outline):
@@ -396,7 +453,7 @@ class StoryGenerator(QMainWindow):
         self.setWindowTitle("Story Generator")
         self.setGeometry(100, 100, 1200, 800)
         self.base_url = "http://127.0.0.1:8080/v1"
-        self.model_name = "qwen-3.8-27b"
+        self.model_name = "local"
         self.api_key = None
         self.worker = None
         self.outline = []
@@ -404,6 +461,7 @@ class StoryGenerator(QMainWindow):
         self.story = {}  # key: "chapter_section", value: content
         self.generation_started_at = None
         self.story_language = "English"
+        self.request_settings = RequestSettings()
         # Conversation history stored on the main window for regenerate use
         self.history = []
 
@@ -441,6 +499,8 @@ class StoryGenerator(QMainWindow):
         self.temperature_spin.setValue(0.7)
         thinking_temperature_layout.addWidget(self.temperature_spin)
         left_layout.addLayout(thinking_temperature_layout)
+        self.thinking_checkbox.stateChanged.connect(self.update_request_settings)
+        self.temperature_spin.valueChanged.connect(self.update_request_settings)
 
         left_layout.addWidget(QLabel("Story Idea:"))
         self.prompt_input = QTextEdit()
@@ -536,12 +596,18 @@ class StoryGenerator(QMainWindow):
         for sec in range(1, self.sections_spin.value() + 1):
             self.regenerate_section_combo.addItem(f"Section {sec}")
 
+    def update_request_settings(self, *_):
+        self.request_settings.update(
+            self.thinking_checkbox.isChecked(), self.temperature_spin.value()
+        )
+
     def generate_story(self):
         self.base_url = self.api_url_input.text().strip()
         self.model_name = self.model_name_input.text().strip()
         self.api_key = self.api_key_input.text().strip()
         thinking_enabled = self.thinking_checkbox.isChecked()
         temperature = self.temperature_spin.value()
+        self.request_settings.update(thinking_enabled, temperature)
         prompt = self.prompt_input.toPlainText().strip()
         num_chapters = self.chapters_spin.value()
         num_sections = self.sections_spin.value()
@@ -574,7 +640,8 @@ class StoryGenerator(QMainWindow):
         # Start worker
         self.worker = AIWorker(
             self.base_url, self.model_name, prompt, num_chapters, num_sections,
-            self.story_language, self.api_key, thinking_enabled, temperature
+            self.story_language, self.api_key, thinking_enabled, temperature,
+            self.request_settings
         )
         self.worker.progress_signal.connect(self.on_progress)
         self.worker.outline_signal.connect(self.on_outline)
@@ -739,13 +806,14 @@ class StoryGenerator(QMainWindow):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        thinking_enabled, temperature = self.request_settings.snapshot()
         payload = {
             "model": self.model_name,
             "system": SYSTEM_PROMPT,
             "messages": messages,
-            "temperature": self.temperature_spin.value(),
+            "temperature": temperature,
         }
-        if self.thinking_checkbox.isChecked():
+        if thinking_enabled:
             payload["reasoning_effort"] = REASONING_EFFORT
         else:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
