@@ -8,7 +8,7 @@ import time
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QSpinBox, QLineEdit, QLabel, QComboBox,
-    QSplitter, QMessageBox, QFileDialog, QCheckBox, QTabWidget
+    QSplitter, QMessageBox, QFileDialog, QCheckBox, QDoubleSpinBox, QTabWidget
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject
 from PySide6.QtGui import QFont, QTextCursor
@@ -77,7 +77,8 @@ class AIWorker(QThread):
     error_signal = Signal(str)
     outline_warning_signal = Signal(str)
 
-    def __init__(self, base_url, model_name, prompt, num_chapters, num_sections, language, api_key=None):
+    def __init__(self, base_url, model_name, prompt, num_chapters, num_sections, language,
+                 api_key=None, thinking_enabled=False, temperature=0.7):
         super().__init__()
         self.base_url = base_url
         self.model_name = model_name
@@ -86,6 +87,8 @@ class AIWorker(QThread):
         self.num_sections = num_sections
         self.language = language
         self.api_key = api_key
+        self.thinking_enabled = thinking_enabled
+        self.temperature = temperature
         self.is_cancelled = False
         self.outline = []
         self.story = {}  # key: "chapter_section", value: content
@@ -184,10 +187,12 @@ class AIWorker(QThread):
             "model": self.model_name,
             "system": SYSTEM_PROMPT,
             "messages": messages,
-            "temperature": 0.7,
-            "reasoning_effort": REASONING_EFFORT
+            "temperature": self.temperature,
         }
-        #"chat_template_kwargs": {"enable_thinking": False}
+        if self.thinking_enabled:
+            payload["reasoning_effort"] = REASONING_EFFORT
+        else:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=120)
             response.raise_for_status()
@@ -425,6 +430,18 @@ class StoryGenerator(QMainWindow):
         self.api_key_input = QLineEdit()
         left_layout.addWidget(self.api_key_input)
 
+        thinking_temperature_layout = QHBoxLayout()
+        self.thinking_checkbox = QCheckBox("Enable thinking")
+        thinking_temperature_layout.addWidget(self.thinking_checkbox)
+        thinking_temperature_layout.addWidget(QLabel("Temperature:"))
+        self.temperature_spin = QDoubleSpinBox()
+        self.temperature_spin.setRange(0.0, 2.0)
+        self.temperature_spin.setSingleStep(0.1)
+        self.temperature_spin.setDecimals(1)
+        self.temperature_spin.setValue(0.7)
+        thinking_temperature_layout.addWidget(self.temperature_spin)
+        left_layout.addLayout(thinking_temperature_layout)
+
         left_layout.addWidget(QLabel("Story Idea:"))
         self.prompt_input = QTextEdit()
         self.prompt_input.setMaximumHeight(100)
@@ -523,6 +540,8 @@ class StoryGenerator(QMainWindow):
         self.base_url = self.api_url_input.text().strip()
         self.model_name = self.model_name_input.text().strip()
         self.api_key = self.api_key_input.text().strip()
+        thinking_enabled = self.thinking_checkbox.isChecked()
+        temperature = self.temperature_spin.value()
         prompt = self.prompt_input.toPlainText().strip()
         num_chapters = self.chapters_spin.value()
         num_sections = self.sections_spin.value()
@@ -555,7 +574,7 @@ class StoryGenerator(QMainWindow):
         # Start worker
         self.worker = AIWorker(
             self.base_url, self.model_name, prompt, num_chapters, num_sections,
-            self.story_language, self.api_key
+            self.story_language, self.api_key, thinking_enabled, temperature
         )
         self.worker.progress_signal.connect(self.on_progress)
         self.worker.outline_signal.connect(self.on_outline)
@@ -724,9 +743,12 @@ class StoryGenerator(QMainWindow):
             "model": self.model_name,
             "system": SYSTEM_PROMPT,
             "messages": messages,
-            "temperature": 0.7,
-            "reasoning_effort": REASONING_EFFORT
+            "temperature": self.temperature_spin.value(),
         }
+        if self.thinking_checkbox.isChecked():
+            payload["reasoning_effort"] = REASONING_EFFORT
+        else:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=120)
